@@ -13,3 +13,5 @@ kubridge:
         - kuKernelAllocMemBlock
         - kuKernelFlushCaches
         - kuKernelCpuUnrestrictedMemcpy
+        - kuKernelRegisterAbortHandler
+        - kuKernelReleaseAbortHandler
