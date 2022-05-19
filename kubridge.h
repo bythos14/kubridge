@@ -40,6 +40,10 @@ typedef struct KuKernelAbortContext
 
 typedef void (*KuKernelAbortHandler)(KuKernelAbortContext *);
 
+typedef struct KuKernelAbortHandlerOpt {
+  SceSize size; //!< Size of structure
+} KuKernelAbortHandlerOpt;
+
 typedef struct SceKernelAddrPair {
   uint32_t addr;                  //!< Address
   uint32_t length;                //!< Length
@@ -84,7 +88,7 @@ void kuKernelFlushCaches(const void *ptr, SceSize len);
 
 int kuKernelCpuUnrestrictedMemcpy(void *dst, const void *src, SceSize len);
 
-int kuKernelRegisterAbortHandler(KuKernelAbortHandler pHandler, KuKernelAbortHandler *pOldHandler);
+int kuKernelRegisterAbortHandler(KuKernelAbortHandler pHandler, KuKernelAbortHandler *pOldHandler, KuKernelAbortHandlerOpt *pOpt);
 void kuKernelReleaseAbortHandler();
 
 #ifdef __cplusplus

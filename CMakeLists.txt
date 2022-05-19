@@ -40,8 +40,6 @@ target_link_libraries(kubridge
   SceProcEventForDriver_stub
   SceThreadmgrForDriver_stub
   SceDebugForDriver_stub
-  SceSysrootForKernel_stub
-  SceSysrootForDriver_stub
 )
 
 vita_create_self(kubridge.skprx kubridge CONFIG exports.yml UNSAFE)

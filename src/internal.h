@@ -5,7 +5,7 @@
 #include <psp2kern/kernel/debug.h>
 
 #ifndef NDEBUG
-#define LOG(msg, ...) ksceDebugPrintf("[kubridge ] - %s: "msg, __FUNCTION__, ##__VA_ARGS__)
+#define LOG(msg, ...) ksceDebugPrintf("[kubridge ]: %s:%d:"msg"\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
 #else
 #define LOG(msg, ...)
 #endif
@@ -41,6 +41,12 @@ typedef struct KuKernelAbortContext
 } KuKernelAbortContext;
 
 typedef void (*KuKernelAbortHandler)(KuKernelAbortContext *);
+
+// Options struct for future expansion
+typedef struct KuKernelAbortHandlerOpt
+{
+    SceSize size;
+} KuKernelAbortHandlerOpt;
 
 typedef struct ProcessAbortHandler
 {
