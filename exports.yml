@@ -13,3 +13,5 @@ kubridge:
         - kuKernelAllocMemBlock: 0x2EF7C290
         - kuKernelFlushCaches: 0x38B70744
         - kuKernelCpuUnrestrictedMemcpy: 0x91D9CABC
+        - kuKernelRegisterAbortHandler: 0x799f5648
+        - kuKernelReleaseAbortHandler: 0xb188292d
