@@ -8,22 +8,28 @@ if(NOT DEFINED CMAKE_TOOLCHAIN_FILE)
   endif()
 endif()
 
-project(kubridge)
+project(kubridge C ASM)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O3 -nostdlib")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O3 -nostdlib -fno-optimize-sibling-calls")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -fno-exceptions")
 
 add_executable(kubridge
-  main.c
+  src/main.c
+  src/mprotect.c
+  src/rwx_patch.S
 )
 
 target_link_libraries(kubridge
   taihenForKernel_stub
   taihenModuleUtils_stub
+  SceCpuForDriver_stub
   SceSysclibForDriver_stub
   SceSysmemForDriver_stub
+  SceProcEventForDriver_stub
   SceThreadmgrForDriver_stub
+  SceDebugForDriver_stub
+  SceSysrootForKernel_stub
 )
 
 vita_create_self(kubridge.skprx kubridge CONFIG exports.yml UNSAFE)
