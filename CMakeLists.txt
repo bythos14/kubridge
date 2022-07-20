@@ -11,7 +11,7 @@ endif()
 project(kubridge C ASM)
 include("${VITASDK}/share/vita.cmake" REQUIRED)
 
-set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O3 -nostdlib")
+set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -Wl,-q -Wall -O3 -nostdlib -fno-optimize-sibling-calls")
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti -fno-exceptions")
 
 if(DEFINED EXCEPTION_SAFETY)
@@ -30,6 +30,8 @@ add_executable(kubridge
   src/exceptions.c
   src/exceptions.S
   ${CMAKE_CURRENT_BINARY_DIR}/exceptions_user.h
+  src/mprotect.c
+  src/rwx_patch.S
 )
 
 target_include_directories(kubridge PRIVATE
@@ -44,6 +46,7 @@ target_link_libraries(kubridge
   SceProcEventForDriver_stub
   SceThreadmgrForDriver_stub
   SceDebugForDriver_stub
+  SceSysrootForKernel_stub
 )
 
 vita_create_self(kubridge.skprx kubridge CONFIG exports.yml UNSAFE)
