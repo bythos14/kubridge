@@ -92,10 +92,12 @@ int module_start(SceSize args, void *argp) {
   module_get_export_func(KERNEL_PID, "ScePower", TAI_ANY_LIBRARY, 0x0E333BEC, (uintptr_t *)&_kscePowerSetSysClockFrequency);
   
   InitExceptionHandlers();
+  InitMemProtect();
 
   return SCE_KERNEL_START_SUCCESS;
 }
 
 int module_stop(SceSize args, void *argp) {
+  TermMemProtect();
   return SCE_KERNEL_STOP_SUCCESS;
 }

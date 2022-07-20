@@ -8,6 +8,11 @@ extern "C" {
 #include <psp2/types.h>
 #include <psp2/kernel/sysmem.h>
 
+#define KU_KERNEL_PROT_NONE  (0x00)
+#define KU_KERNEL_PROT_READ  (0x40)
+#define KU_KERNEL_PROT_WRITE (0x20)
+#define KU_KERNEL_PROT_EXEC  (0x10)
+
 #define KU_KERNEL_ABORT_TYPE_DATA_ABORT 0
 #define KU_KERNEL_ABORT_TYPE_PREFETCH_ABORT 1
 
@@ -93,6 +98,8 @@ int kuPowerSetSysClockFrequency(int freq);
 
 int kuKernelRegisterAbortHandler(KuKernelAbortHandler pHandler, KuKernelAbortHandler *pOldHandler, KuKernelAbortHandlerOpt *pOpt);
 void kuKernelReleaseAbortHandler();
+
+int kuKernelMemProtect(void *addr, SceSize size, SceUInt32 prot);
 
 #ifdef __cplusplus
 }
