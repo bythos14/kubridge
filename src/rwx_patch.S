@@ -37,7 +37,9 @@ MemBlockTypeToL2PTESmallPage_UserRWX:
     b      MemBlockTypeToL2PTESmallPage_UserRWX_kpanic
 MemBlockTypeToL2PTESmallPage_UserRWX_RWX:
     orr    r0, r2, #0x30 @ User and Priviledged Read-Write-Execute
+    pop    {r4, pc}
 MemBlockTypeToL2PTESmallPage_UserRWX_NONE:
+    mov    r0, r2
     pop    {r4, pc}
 MemBlockTypeToL2PTESmallPage_UserRWX_kpanic:
     mov    r1, lr

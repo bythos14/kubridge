@@ -37,13 +37,6 @@ SceUID kuKernelAllocMemBlock(const char *name, SceKernelMemBlockType type, SceSi
   if (res < 0)
     goto error;
 
-  if (k_opt.attr & 0x40)
-  {
-    k_opt.mirror_blockid = res = kscePUIDtoGUID(ksceKernelGetProcessId(), k_opt.mirror_blockid);
-    if (res < 0)
-      goto error;
-  }
-
   res = ksceKernelAllocMemBlock(k_name, type, size, &k_opt);
   if (res < 0)
     goto error;
