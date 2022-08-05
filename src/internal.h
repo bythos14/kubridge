@@ -15,6 +15,8 @@
 #define KU_KERNEL_PROT_WRITE (0x20)
 #define KU_KERNEL_PROT_EXEC  (0x10)
 
+#define KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE (0x1)
+
 #define KU_KERNEL_ABORT_TYPE_DATA_ABORT 0
 #define KU_KERNEL_ABORT_TYPE_PREFETCH_ABORT 1
 
@@ -52,6 +54,14 @@ typedef struct KuKernelAbortHandlerOpt
 {
     SceSize size;
 } KuKernelAbortHandlerOpt;
+
+typedef struct KuKernelMemCommitOpt
+{
+    SceSize size;
+    SceUInt32 attr;
+    SceUID baseBlock;
+    SceUInt32 baseOffset;
+} KuKernelMemCommitOpt;
 
 typedef struct ProcessAbortHandler
 {

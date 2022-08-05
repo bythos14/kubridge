@@ -15,6 +15,7 @@
 #include "internal.h"
 #include "sysmem/sysmem_types.h"
 
+// #define PRINT_MEMBLOCK_PAGES
 #ifdef PRINT_MEMBLOCK_PAGES
 const char *ksceKernelGetNameForUid2(SceUID guid);
 const char *GetMemBlockName(SceUIDMemBlockObject *pMemBlock)
@@ -59,6 +60,7 @@ static int (*AllocVirPageObject)(SceUIDPartitionObject *pPartition, SceKernelMem
 static int (*FreeVirPageObject)(SceUIDPartitionObject *pPartition, void *pFixedHeap, SceKernelMemBlockPage *pPage);
 static int (*MapVirPageCore)(void *pCommand, SceUIDPartitionObject *pPartition, void *param_3, SceUIDMemBlockObject *pMemBlock, void *vBase, SceSize size, SceUInt32 pBase);
 static int (*UnmapVirPageWithOpt)(SceUIDPartitionObject *pPartition, SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPage, SceUInt32 flags);
+static int (*VirPageAllocPhyPage)(SceKernelMemBlockPage *pPage, SceUIDPartitionObject *pPartition, SceUIDPhyMemPartObject *pPhyMem, SceKernelMemBlockPage **ppPage);
 
 uintptr_t MemBlockTypeToL1PTE_DebugContext;
 uintptr_t MemBlockTypeToL2PTESmallPage_DebugContext;
@@ -72,7 +74,7 @@ extern void MemBlockTypeToL2PTELargePage_UserRWX();
 static int SplitPage(SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPage, void *targetAddr, SceSize targetSize, int targetType)
 {
     SceKernelMemBlockPage *pNewPage;
-    int ret;
+    int ret = 0;
 
     if ((ret = AllocVirPageObject(pMemBlock->pPartition, &pNewPage)) < 0)
     {
@@ -164,7 +166,7 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
 {
     SceKernelMemBlockPage *pPage, *pNextPage, *pPrevPage = NULL;
     SceUInt32 oldMemBlockCode;
-    int ret, intrState;
+    int ret = 0, intrState;
     void *curAddr;
     SceSize curSize;
 
@@ -185,7 +187,7 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
     InspectMemBlockPages(pMemBlock);
 #endif
 
-    while (pPage != NULL)
+    while ((pPage != NULL) && (curSize != 0))
     {
     checkPage:
         pNextPage = pPage->next;
@@ -246,13 +248,276 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
     return ret;
 }
 
+int MemBlockCommitPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **addr, SceSize *len)
+{
+    SceKernelMemBlockPage *pPage, *pNextPage, *pNewPage;
+    SceUInt32 oldMemBlockCode;
+    int ret = 0, intrState;
+    void *curAddr;
+    SceSize curSize;
+
+    if ((pMemBlock->otherFlags & 0xF0000) != 0x40000)
+    {
+        LOG("Error: MemBlock paging type unsupported (0x%X)", pMemBlock->otherFlags & 0xF0000);
+        return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
+    }
+
+    intrState = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
+
+    curAddr = *addr;
+    curSize = *len;
+
+    pPage = pMemBlock->pages;
+
+#ifdef PRINT_MEMBLOCK_PAGES
+    InspectMemBlockPages(pMemBlock);
+#endif
+
+    while ((pPage != NULL) && (curSize != 0))
+    {
+    checkPage:
+        pNextPage = pPage->next;
+        if ((pPage->vaddr < curAddr && ((pPage->vaddr + pPage->size) <= curAddr)) ||
+            (pPage->vaddr >= (curAddr + curSize))) // Page is not within the target region
+            goto nextPage;
+
+        if ((pPage->flags & 0x3F) == 0x4 || (pPage->flags & 0x3F) == 0x10)
+        {
+            if (pPage->vaddr == curAddr)
+            {
+                curSize -= (curSize >= pPage->size ? pPage->size : curSize);
+                curAddr += (curSize >= pPage->size ? pPage->size : curSize);
+            }
+            goto nextPage;
+        }
+
+        if (pPage->vaddr < curAddr)
+        {
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1)) < 0)
+                break;
+            goto checkPage;
+        }
+
+        if ((pPage->vaddr + pPage->size) > (curAddr + curSize))
+        {
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1)) < 0)
+                break;
+            goto checkPage;
+        }
+
+        if ((pPage->size & (pPage->size - 1)) != 0) // Size is not a power of two.
+        {
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, (1 << (31 - __builtin_clz(pPage->size))), 0x1)) < 0)
+                break;
+            goto checkPage;
+        }
+
+        curSize -= pPage->size;
+        curAddr += pPage->size;
+
+        pPage->flags = (pPage->flags & ~0x3F) | 0x4;
+
+        if ((ret = VirPageAllocPhyPage(pPage, pMemBlock->pPartition, pMemBlock->pPhyPart, &pNewPage)) < 0)
+        {
+            LOG("Error: Failed to allocate PhyPages");
+            break;
+        }
+
+        oldMemBlockCode = pMemBlock->memBlockCode;
+        pMemBlock->memBlockCode = (pMemBlock->memBlockCode & 0xFFFFFF0F) | prot;
+
+        if ((ret = MapVirPageCore(NULL, pMemBlock->pPartition, &pMemBlock->pPartition->tiny.pMMUContext->pProcessTTBR, pMemBlock, pPage->vaddr, pPage->size, pPage->paddr)) < 0)
+        {
+            LOG("Error: Failed to map page");
+            pMemBlock->memBlockCode = oldMemBlockCode;
+            break;
+        }
+        while (pNewPage != pPage)
+        {
+            pPage = pPage->next;
+            if ((ret = MapVirPageCore(NULL, pMemBlock->pPartition, &pMemBlock->pPartition->tiny.pMMUContext->pProcessTTBR, pMemBlock, pPage->vaddr, pPage->size, pPage->paddr)) < 0)
+            {
+                LOG("Error: Failed to map page");
+                pMemBlock->memBlockCode = oldMemBlockCode;
+                break;
+            }
+        }
+        pMemBlock->memBlockCode = oldMemBlockCode;
+    nextPage:
+        pPage = pNextPage;
+    }
+
+#ifdef PRINT_MEMBLOCK_PAGES
+    InspectMemBlockPages(pMemBlock);
+#endif
+
+    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState);
+
+    *addr = curAddr;
+    *len = curSize;
+    return ret;
+}
+
+static int FindMirrorPage(SceUIDMemBlockObject *pMemBlock, SceUInt32 offset, SceUInt32 *paddr, SceSize *size)
+{
+    SceKernelMemBlockPage *pPage = pMemBlock->pages;
+    void *targetAddr = pMemBlock->vaddr + offset;
+    SceSize targetSize = *size;
+    SceUInt32 mirrorPaddr;
+    SceSize mirrorSize;
+    while (pPage)
+    {
+        if ((pPage->vaddr < targetAddr && ((pPage->vaddr + pPage->size) <= targetAddr)) ||
+            (pPage->vaddr >= (targetAddr + targetSize))) // Page is not within the target region
+            goto nextPage;
+
+        if ((pPage->flags & 0x14) == 0)
+        {
+            LOG("Error: Mirror page not physically backed");
+            return SCE_KERNEL_ERROR_VIRPAGE_ERROR;
+        }
+
+        mirrorPaddr = pPage->paddr;
+        mirrorSize = pPage->size;
+
+        if (pPage->vaddr < targetAddr)
+        {
+            mirrorPaddr += ((uintptr_t)targetAddr - (uintptr_t)pPage->vaddr);
+            mirrorSize -= ((uintptr_t)targetAddr - (uintptr_t)pPage->vaddr);
+        }
+        if ((pPage->vaddr + pPage->size) > (targetAddr + targetSize))
+        {
+            mirrorSize -= ((pPage->vaddr + pPage->size) - (targetAddr + targetSize));
+        }
+
+        break;
+    nextPage:
+        pPage = pPage->next;
+    }
+    if (pPage == NULL)
+        return SCE_KERNEL_ERROR_VIRPAGE_ERROR;
+
+    *paddr = mirrorPaddr;
+    *size = mirrorSize;
+
+    return 0;
+}
+
+int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **addr, SceSize *len, SceUIDMemBlockObject *pBaseMemBlock, SceUInt32 *offset)
+{
+    SceKernelMemBlockPage *pPage, *pNextPage, *pMirrorPage;
+    SceUInt32 oldMemBlockCode;
+    int ret = 0, intrState[2];
+    void *curAddr;
+    SceSize curSize;
+    SceUInt32 curOffset;
+    SceUInt32 mirrorPaddr, mirrorSize;
+
+    intrState[0] = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
+    intrState[1] = ksceKernelCpuLockSuspendIntrStoreFlag(&pBaseMemBlock->spinLock);
+
+    if ((pMemBlock->otherFlags & 0xF0000) != 0x40000)
+    {
+        LOG("Error: MemBlock paging type unsupported (0x%X)", pMemBlock->otherFlags & 0xF0000);
+        return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
+    }
+    if ((pBaseMemBlock->otherFlags & 0xF0000) != 0x40000)
+    {
+        LOG("Error: MemBlock paging type unsupported (0x%X)", pBaseMemBlock->otherFlags & 0xF0000);
+        return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
+    }
+
+    curAddr = *addr;
+    curSize = *len;
+    curOffset = *offset;
+
+    pPage = pMemBlock->pages;
+
+#ifdef PRINT_MEMBLOCK_PAGES
+    InspectMemBlockPages(pMemBlock);
+    InspectMemBlockPages(pBaseMemBlock);
+#endif
+
+    while ((pPage != NULL) && (curSize != 0))
+    {
+    checkPage:
+        pNextPage = pPage->next;
+        if ((pPage->vaddr < curAddr && ((pPage->vaddr + pPage->size) <= curAddr)) ||
+            (pPage->vaddr >= (curAddr + curSize))) // Page is not within the target region
+            goto nextPage;
+
+        if (pPage->vaddr < curAddr)
+        {
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1)) < 0)
+                break;
+            goto checkPage;
+        }
+
+        if ((pPage->vaddr + pPage->size) > (curAddr + curSize))
+        {
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1)) < 0)
+                break;
+            goto checkPage;
+        }
+
+        if ((pPage->flags & 0x3F) == 0x4)
+        {
+            LOG("Warning: Pages are already commited at addr %p", curAddr);
+            curSize -= (curSize >= pPage->size ? pPage->size : curSize);
+            curAddr += (curSize >= pPage->size ? pPage->size : curSize);
+            curOffset += (curSize >= pPage->size ? pPage->size : curSize);
+            goto nextPage;
+        }
+
+        mirrorSize = pPage->size;
+        if ((ret = FindMirrorPage(pBaseMemBlock, curOffset, &mirrorPaddr, &mirrorSize)) < 0)
+            break;
+
+        if (pPage->size > mirrorSize)
+        {
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, mirrorSize, 0x1)) < 0)
+                break;
+            goto checkPage;
+        }
+
+        pPage->flags = (pPage->flags & ~0x3F) | 0x10;
+        pPage->paddr = mirrorPaddr;
+
+        curSize -= pPage->size;
+        curAddr += pPage->size;
+        curOffset += pPage->size;
+
+        oldMemBlockCode = pMemBlock->memBlockCode;
+        pMemBlock->memBlockCode = (pMemBlock->memBlockCode & 0xFFFFFF0F) | prot;
+        if ((ret = MapVirPageCore(NULL, pMemBlock->pPartition, &pMemBlock->pPartition->tiny.pMMUContext->pProcessTTBR, pMemBlock, pPage->vaddr, pPage->size, pPage->paddr)) < 0)
+        {
+            LOG("Error: Failed to map page");
+            pMemBlock->memBlockCode = oldMemBlockCode;
+            break;
+        }
+        pMemBlock->memBlockCode = oldMemBlockCode;
+    nextPage:
+        pPage = pNextPage;
+    }
+
+#ifdef PRINT_MEMBLOCK_PAGES
+    InspectMemBlockPages(pMemBlock);
+#endif
+
+    ksceKernelCpuUnlockResumeIntrStoreFlag(&pBaseMemBlock->spinLock, intrState[1]);
+    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState[0]);
+
+    *addr = curAddr;
+    *len = curSize;
+    *offset = curOffset;
+    return ret;
+}
+
 int kuKernelMemProtect(void *addr, SceSize len, SceUInt32 prot)
 {
     SceUIDAddressSpaceObject *pAS;
     SceUIDMemBlockObject *pMemBlock;
-    SceKernelMemBlockPage *pPage, *pNextPage, *pPrevPage = NULL;
-    SceUInt32 oldMemBlockCode;
-    int ret, intrState;
+    int ret = 0;
 
     if (len == 0)
         return 0;
@@ -284,10 +549,184 @@ int kuKernelMemProtect(void *addr, SceSize len, SceUInt32 prot)
         
         if ((ret = MemBlockProtectPages(pMemBlock, prot, &curAddr, &curSize)) < 0)
         {
-            LOG("Failed to set protection for pages");
+            LOG("Error: Failed to set protection for pages");
             return ret;
         }
     }
+
+    return ret;
+}
+
+SceUID kuKernelMemReserve(void **addr, SceSize size, SceKernelMemBlockType memBlockType)
+{
+    void *allocAddr;
+    int ret = 0, intrState;
+    SceUID memBlock, userMemBlock;
+    SceUIDMemBlockObject *pMemBlock;
+    SceKernelMemBlockPage *pPage;
+    SceKernelAllocMemBlockKernelOpt opt;
+    opt.size = sizeof(opt);
+    opt.attr = 0x40000; // NOPHYPAGE
+
+    if ((ret = ksceKernelMemcpyFromUser(&allocAddr, addr, sizeof(void *))) < 0)
+    {
+        LOG("Error: Failed to copy addr from user space");
+        return ret;
+    }
+
+    if (allocAddr != NULL)
+    {
+        opt.attr |= 0x1; // HAS_VBASE
+        opt.field_C = (uintptr_t)allocAddr;
+    }
+
+    memBlock = ksceKernelAllocMemBlock("mem_reserve", memBlockType, size, &opt);
+    if (memBlock < 0)
+    {
+        LOG("Error: Failed to allocate memBlock (0x%08X)", memBlock);
+        return memBlock;
+    }
+
+    if ((allocAddr == NULL) && ((ret = ksceKernelGetMemBlockBase(memBlock, &allocAddr)) < 0))
+    {
+        LOG("Error: Failed to get base of memBlock (0x%08X)", ret);
+        return ret;
+    }
+
+    if ((ret = ksceKernelMemcpyToUser(addr, &allocAddr, sizeof(void *))) < 0)
+    {
+        LOG("Error: Failed to copy allocAddr to user space");
+        return ret;
+    }
+
+    if ((ret = ksceGUIDReferObject(memBlock, (SceObjectBase **)&pMemBlock)) < 0)
+    {
+        LOG("Error: Failed to refer memBlock object (0x%08X)", ret);
+        return ret;
+    }
+
+    intrState = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
+
+    pPage = pMemBlock->pages;
+    while (pPage != NULL)
+    {
+        pPage->flags = (pPage->flags & ~0x3F) | 0x1;
+        pPage = pPage->next;
+    }
+
+    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState);
+
+    ksceGUIDReleaseObject(memBlock);
+
+    userMemBlock = kscePUIDOpenByGUID(ksceKernelGetProcessId(), memBlock);
+    if (userMemBlock < 0)
+    {
+        LOG("Error: Failed to create PUID for memBlock (0x%08X)", userMemBlock);
+        ksceKernelFreeMemBlock(memBlock);
+    }
+
+    return userMemBlock;
+}
+
+int kuKernelMemCommit(void *addr, SceSize len, SceUInt32 prot, KuKernelMemCommitOpt *pOpt)
+{
+    KuKernelMemCommitOpt opt;
+    SceUIDAddressSpaceObject *pAS;
+    SceUIDMemBlockObject *pMemBlock, *pBaseMemBlock;
+    SceUID baseMemBlock = -1;
+    int ret = 0;
+
+    if (len == 0)
+        return 0;
+
+    if (((uintptr_t)addr < 0x40000000) || ((uintptr_t)addr & 0xFFF))
+    {
+        LOG("Error: addr is invalid");
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+    }
+
+    if (prot & ~(KU_KERNEL_PROT_READ | KU_KERNEL_PROT_WRITE | KU_KERNEL_PROT_EXEC))
+    {
+        LOG("Error: Invalid bits set in prot");
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+    }
+    
+    if (pOpt != NULL)
+    {
+        if ((ret = ksceKernelMemcpyFromUser(&opt, pOpt, sizeof(opt.size))) < 0)
+        {
+            LOG("Error: Failed to copy pOpt->size");
+            return ret;
+        }
+
+        if (opt.size != sizeof(opt))
+        {
+            LOG("Error: pOpt->size is invalid");
+            return SCE_KERNEL_ERROR_INVALID_ARGUMENT_SIZE;
+        }
+
+        if ((ret = ksceKernelMemcpyFromUser(&opt, pOpt, opt.size)) < 0)
+        {
+            LOG("Error: Failed to copy pOpt");
+            return ret;
+        }
+    }
+    else
+    {
+        memset(&opt, 0, sizeof(opt));
+        opt.size = sizeof(opt);
+        opt.attr = 0;
+    }
+
+    if (opt.attr & KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE)
+    {
+        if ((baseMemBlock = kscePUIDtoGUID(ksceKernelGetProcessId(), opt.baseBlock)) < 0)
+        {
+            LOG("Error: Failed to get GUID for baseBlock");
+            return ret;
+        }
+
+        if ((ret = ksceGUIDReferObject(baseMemBlock, (SceObjectBase **)&pBaseMemBlock)) < 0)
+        {
+            LOG("Error: Failed to refer baseBlock");
+            return ret;
+        }
+    }
+
+    void *curAddr = addr;
+    SceSize curSize = (len + 0xFFF) & ~0xFFF; // Align to page size
+    SceUInt32 curOffset = opt.baseOffset;
+
+    pAS = ksceKernelSysrootGetCurrentAddressSpaceCB();
+
+    while (curSize)
+    {
+        if ((ret = AddressSpaceFindMemBlockCBByAddr(pAS, curAddr, 0, &pMemBlock)) < 0)
+        {
+            LOG("Error: Failed to find memBlock at address %p", curAddr);
+            break;
+        }
+
+        if (opt.attr & KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE)
+        {
+            if ((ret = MemBlockCommitPagesWithBase(pMemBlock, prot, &curAddr, &curSize, pBaseMemBlock, &curOffset)) < 0)
+            {
+                LOG("Error: Failed to commit pages with base");
+                break;
+            }
+        }
+        else
+        {
+            if ((ret = MemBlockCommitPages(pMemBlock, prot, &curAddr, &curSize)) < 0)
+            {
+                LOG("Error: Failed to commit pages");
+                break;
+            }
+        }
+    }
+
+    if (opt.attr & KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE)
+        ksceGUIDReleaseObject(baseMemBlock);
 
     return ret;
 }
