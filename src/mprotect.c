@@ -212,7 +212,7 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
             goto checkPage;
         }
 
-        if (UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPage, 0) < 0)
+        if ((ret = UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPage, 0)) < 0)
         {
             LOG("Error: Failed to unmap page");
             break;
@@ -325,7 +325,6 @@ int MemBlockCommitPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **
 
         oldMemBlockCode = pMemBlock->memBlockCode;
         pMemBlock->memBlockCode = (pMemBlock->memBlockCode & 0xFFFFFF0F) | prot;
-
         if ((ret = MapVirPageCore(NULL, pMemBlock->pPartition, &pMemBlock->pPartition->tiny.pMMUContext->pProcessTTBR, pMemBlock, pPage->vaddr, pPage->size, pPage->paddr)) < 0)
         {
             LOG("Error: Failed to map page");
@@ -405,7 +404,7 @@ static int FindMirrorPage(SceUIDMemBlockObject *pMemBlock, SceUInt32 offset, Sce
 
 int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **addr, SceSize *len, SceUIDMemBlockObject *pBaseMemBlock, SceUInt32 *offset)
 {
-    SceKernelMemBlockPage *pPage, *pNextPage, *pMirrorPage;
+    SceKernelMemBlockPage *pPage, *pNextPage;
     SceUInt32 oldMemBlockCode;
     int ret = 0, intrState[2];
     void *curAddr;
@@ -524,7 +523,7 @@ int kuKernelMemProtect(void *addr, SceSize len, SceUInt32 prot)
 
     if (((uintptr_t)addr < 0x40000000) || ((uintptr_t)addr & 0xFFF))
     {
-        LOG("Error: addr is invalid");
+        LOG("Error: addr is invalid (%p)", addr);
         return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
     }
 
@@ -590,19 +589,19 @@ SceUID kuKernelMemReserve(void **addr, SceSize size, SceKernelMemBlockType memBl
     if ((allocAddr == NULL) && ((ret = ksceKernelGetMemBlockBase(memBlock, &allocAddr)) < 0))
     {
         LOG("Error: Failed to get base of memBlock (0x%08X)", ret);
-        return ret;
+        goto FreeBlock;
     }
 
     if ((ret = ksceKernelMemcpyToUser(addr, &allocAddr, sizeof(void *))) < 0)
     {
         LOG("Error: Failed to copy allocAddr to user space");
-        return ret;
+        goto FreeBlock;
     }
 
     if ((ret = ksceGUIDReferObject(memBlock, (SceObjectBase **)&pMemBlock)) < 0)
     {
         LOG("Error: Failed to refer memBlock object (0x%08X)", ret);
-        return ret;
+        goto FreeBlock;
     }
 
     intrState = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
@@ -611,6 +610,11 @@ SceUID kuKernelMemReserve(void **addr, SceSize size, SceKernelMemBlockType memBl
     while (pPage != NULL)
     {
         pPage->flags = (pPage->flags & ~0x3F) | 0x1;
+        if ((ret = UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPage, 1)) < 0)
+        {
+            LOG("Error: Failed to unmap page");
+            goto FreeBlock;
+        }
         pPage = pPage->next;
     }
 
@@ -622,10 +626,13 @@ SceUID kuKernelMemReserve(void **addr, SceSize size, SceKernelMemBlockType memBl
     if (userMemBlock < 0)
     {
         LOG("Error: Failed to create PUID for memBlock (0x%08X)", userMemBlock);
-        ksceKernelFreeMemBlock(memBlock);
     }
 
     return userMemBlock;
+
+FreeBlock:
+    ksceKernelFreeMemBlock(memBlock);
+    return ret;
 }
 
 int kuKernelMemCommit(void *addr, SceSize len, SceUInt32 prot, KuKernelMemCommitOpt *pOpt)
