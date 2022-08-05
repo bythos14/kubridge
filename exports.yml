@@ -18,3 +18,5 @@ kubridge:
         - kuKernelRegisterAbortHandler: 0x799f5648
         - kuKernelReleaseAbortHandler: 0xb188292d
         - kuKernelMemProtect: 0x566d2af1
+        - kuKernelMemReserve: 0xced3608c
+        - kuKernelMemCommit: 0x9c0cd758
