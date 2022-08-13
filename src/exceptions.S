@@ -9,8 +9,8 @@
 
 @ Exception safety has 3 levels: 
 @ 0 - No safety measures
-@ 1 - Copies to/from user space are exception safe
-@ 2 - The stack pointer validity and free space is checked
+@ 1 - The stack pointer validity and free space is checked
+@ 2 - Copies to/from user space are exception safe
 #if !defined(EXCEPTION_SAFETY)
 #define EXCEPTION_SAFETY 1
 #endif
@@ -28,11 +28,11 @@
 .global handlersMutex
 
 .macro CopyFromUser
-#if (EXCEPTION_SAFETY >= 1)
-    cps #0x13
-    str lr, [sp, #-0x4]!
+#if (EXCEPTION_SAFETY >= 2)
+    mov r12, sp
+    cps #0x1F
+    mov sp, r12
     bl ksceKernelMemcpyFromUser
-    ldr lr, [sp], #0x4
     cps #0x17
 #else
     bl memcpy
@@ -41,11 +41,11 @@
 .endm
 
 .macro CopyToUser
-#if (EXCEPTION_SAFETY >= 1)
-    cps #0x13
-    str lr, [sp, #-0x4]!
+#if (EXCEPTION_SAFETY >= 2)
+    mov r12, sp
+    cps #0x1F
+    mov sp, r12
     bl ksceKernelMemcpyToUser
-    ldr lr, [sp], #0x4
     cps #0x17
 #else
     bl memcpy
@@ -198,9 +198,17 @@ LReturnToAbortHandler:
     ldr r1, [r1]
     cmp r5, r1
     beq LReturnToAbortHandler_return @ Process abort handler is default, Go to the next exception handler
-#if (EXCEPTION_SAFETY >= 2)
+#if (EXCEPTION_SAFETY >= 1)
     ldr r0, [sp, #0x34]
+#if (EXCEPTION_SAFETY < 2)
     bl CheckStackPointer
+#else
+    mov r12, sp
+    cps #0x1F
+    mov sp, r12
+    bl CheckStackPointer
+    cps #0x17
+#endif
     cmp r0, #0x1
     bne LReturnToAbortHandler_return @ Go to next abort handler if the user stack isn't usable
 #endif
@@ -278,7 +286,7 @@ DabtExceptionHandler_lvl0:
     mov r2, #0
     str r2, [sp, #0x8]
     pop {r2, r3}
-    b LReturnToAbortHandler @ Go to ReturnToAbortHandler with abortType in [sp, #0x4]
+    b LReturnToAbortHandler @ Go to ReturnToAbortHandler with abortType in [sp, #0x0]
 LDabtExceptionHandler_lvl0_ReturnFromHandler:
     add sp, #0x10
     cmp r1, #0
