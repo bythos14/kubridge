@@ -15,6 +15,10 @@
 #include "internal.h"
 #include "exceptions_user.h"
 
+#if !defined(EXCEPTION_SAFETY)
+#define EXCEPTION_SAFETY 1
+#endif
+
 typedef struct SceKernelExceptionHandler
 {
     struct SceKernelExceptionHandler *nextHandler;
@@ -45,20 +49,32 @@ static SceUID userAbortMemBlock = -1;
 int CheckStackPointer(void *stackPointer)
 {
     void *stackBounds[2];
-    if (ksceKernelMemcpyFromUser(&stackBounds[0], ksceKernelGetThreadTLSAddr(ksceKernelGetThreadId(), 2), sizeof(stackBounds)) < 0)
+    uint32_t *tlsAddr;
+    asm volatile("mrc p15, 0, %0, c13, c0, #3" : "=r" (tlsAddr)); // Load TLS address from TPIDRURO register
+    if (tlsAddr == 0)
+        return 0;
+
+    tlsAddr -= (0x800 / sizeof(uint32_t));
+
+#if (EXCEPTION_SAFETY >= 2)
+    if (ksceKernelMemcpyFromUser(&stackBounds[0], &tlsAddr[2], sizeof(stackBounds)) < 0)
     {
-        LOG("Failed to load stack bounds from TLS");
+        LOG("Error: Failed to load stack bounds from TLS");
         return 0;
     }
+#else
+    stackBounds[0] = (void *)tlsAddr[2];
+    stackBounds[1] = (void *)tlsAddr[3];
+#endif
 
-    if (stackPointer > stackBounds[0] || stackPointer < stackBounds[1])
+    if (stackPointer > stackBounds[0] || stackPointer <= stackBounds[1])
     {
-        LOG("Invalid stack pointer for thread 0x%X (sp: %p, stack bottom: %p, stack top: %p)", ksceKernelGetThreadId(), stackPointer, stackBounds[0], stackBounds[1]);
+        LOG("Error: Stack pointer for thread 0x%X is out-of-bounds (sp: %p, stack bottom: %p, stack top: %p)", ksceKernelGetThreadId(), stackPointer, stackBounds[0], stackBounds[1]);
         return 0;
     }
 
     stackPointer -= (0x160 + 0x400); // 0x160 for the abort context, plus an extra 0x400 for use in the abort handler
-    if (stackPointer > stackBounds[0] || stackPointer < stackBounds[1])
+    if (stackPointer > stackBounds[0] || stackPointer <= stackBounds[1])
     {
         LOG("Insufficient stack space on thread 0x%X to call the abort handler (sp: %p, stack bottom: %p, stack top: %p)", ksceKernelGetThreadId(), stackPointer + (0x160 + 0x400), stackBounds[0], stackBounds[1]);
         return 0;
