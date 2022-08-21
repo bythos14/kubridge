@@ -12,8 +12,12 @@
 
 #include <taihen.h>
 
+#include <stdbool.h>
+
 #include "internal.h"
 #include "sysmem/sysmem_types.h"
+
+#define MIN(a, b) (a > b ? b : a)
 
 // #define PRINT_MEMBLOCK_PAGES
 #ifdef PRINT_MEMBLOCK_PAGES
@@ -61,6 +65,7 @@ static int (*FreeVirPageObject)(SceUIDPartitionObject *pPartition, void *pFixedH
 static int (*MapVirPageCore)(void *pCommand, SceUIDPartitionObject *pPartition, void *param_3, SceUIDMemBlockObject *pMemBlock, void *vBase, SceSize size, SceUInt32 pBase);
 static int (*UnmapVirPageWithOpt)(SceUIDPartitionObject *pPartition, SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPage, SceUInt32 flags);
 static int (*VirPageAllocPhyPage)(SceKernelMemBlockPage *pPage, SceUIDPartitionObject *pPartition, SceUIDPhyMemPartObject *pPhyMem, SceKernelMemBlockPage **ppPage);
+static int (*PhyMemPartFreePhyPage)(SceUIDPhyMemPartObject *pPhyPart, SceKernelPhyPage *pPhyPage);
 
 uintptr_t MemBlockTypeToL1PTE_DebugContext;
 uintptr_t MemBlockTypeToL2PTESmallPage_DebugContext;
@@ -71,7 +76,7 @@ extern void MemBlockTypeToL1PTE_UserRWX();
 extern void MemBlockTypeToL2PTESmallPage_UserRWX();
 extern void MemBlockTypeToL2PTELargePage_UserRWX();
 
-static int SplitPage(SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPage, void *targetAddr, SceSize targetSize, int targetType)
+static int SplitPage(SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPage, void *targetAddr, SceSize targetSize, int targetType, bool remap)
 {
     SceKernelMemBlockPage *pNewPage;
     int ret = 0;
@@ -83,7 +88,7 @@ static int SplitPage(SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPa
     }
 
     pNewPage->magic = pPage->magic;
-    pNewPage->flags = (pPage->flags & ~0x3F) | targetType; // 0x10 is used for pages created with a specific physical address (CDRAM pages also).
+    pNewPage->flags = (pPage->flags & ~0x3F) | targetType;
 
     if (pPage->vaddr < targetAddr)
         pNewPage->size = pPage->size - (targetAddr - pPage->vaddr); // Old page will inhabit the area below the target
@@ -103,7 +108,7 @@ static int SplitPage(SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPa
 
     pPage->size -= pNewPage->size;
 
-    if ((pPage->flags & 0x14) && (ret = MapVirPageCore(NULL, pMemBlock->pPartition, &pMemBlock->pPartition->tiny.pMMUContext->pProcessTTBR, pMemBlock, pPage->vaddr, pPage->size, pPage->paddr)) < 0)
+    if ((pPage->flags & 0x14) && remap && (ret = MapVirPageCore(NULL, pMemBlock->pPartition, &pMemBlock->pPartition->tiny.pMMUContext->pProcessTTBR, pMemBlock, pPage->vaddr, pPage->size, pPage->paddr)) < 0)
     {
         LOG("Error: Failed to remap split page");
         FreeVirPageObject(pMemBlock->pPartition, (void *)pMemBlock->pPartition->tiny.pMMUContext->unk_0x1C, pNewPage);
@@ -123,17 +128,17 @@ static int SplitPage(SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPa
     return 0;
 }
 
-#define MERGE(pPage0, pPage1)                                                                                        \
+#define MERGE(pPage0, pPage1, unmap)                                                                                        \
     do                                                                                                               \
     {                                                                                                                \
-        if (UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPage1, 0) < 0)                                    \
+        if (unmap && UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPage1, 0) < 0)                                    \
             LOG("Error: Failed to unmap merge page");                                                                \
         pPage0->size += pPage1->size;                                                                                \
         pPage0->next = pPage1->next;                                                                                 \
         FreeVirPageObject(pMemBlock->pPartition, (void *)pMemBlock->pPartition->tiny.pMMUContext->unk_0x1C, pPage1); \
     } while (0)
 
-static SceKernelMemBlockPage *TryMergePages(SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPage, SceKernelMemBlockPage *pPrevPage, SceKernelMemBlockPage **ppNextPage, void **targetAddr, SceSize *targetSize)
+static SceKernelMemBlockPage *TryMergePages(SceUIDMemBlockObject *pMemBlock, SceKernelMemBlockPage *pPage, SceKernelMemBlockPage *pPrevPage, SceKernelMemBlockPage **ppNextPage, void **targetAddr, SceSize *targetSize, bool isMapped)
 {
     SceKernelMemBlockPage *pNextPage = *ppNextPage;
 
@@ -142,7 +147,7 @@ static SceKernelMemBlockPage *TryMergePages(SceUIDMemBlockObject *pMemBlock, Sce
     {
         *targetSize -= pNextPage->size;
         *targetAddr += pNextPage->size;
-        MERGE(pPage, pNextPage);
+        MERGE(pPage, pNextPage, true);
         pNextPage = pPage->next;
     }
 
@@ -152,7 +157,7 @@ static SceKernelMemBlockPage *TryMergePages(SceUIDMemBlockObject *pMemBlock, Sce
     {
         if (UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPrevPage, 0) < 0)
             LOG("Error: Failed to unmap merge page");
-        MERGE(pPrevPage, pPage);
+        MERGE(pPrevPage, pPage, isMapped);
         pPage = pPrevPage;
     }
 
@@ -169,6 +174,7 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
     int ret = 0, intrState;
     void *curAddr;
     SceSize curSize;
+    bool isMapped = true;
 
     if ((pMemBlock->otherFlags & 0xF0000) != 0x40000)
     {
@@ -189,30 +195,37 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
 
     while ((pPage != NULL) && (curSize != 0))
     {
-    checkPage:
         pNextPage = pPage->next;
         if ((pPage->vaddr < curAddr && ((pPage->vaddr + pPage->size) <= curAddr)) ||
             (pPage->vaddr >= (curAddr + curSize))) // Page is not within the target region
             goto nextPage;
 
-        if ((pPage->flags & 0x3F) != 0x4 && (pPage->flags & 0x3F) != 0x10)
+        if ((pPage->flags & 0x14) == 0) // Unmapped pages
+        {
+            SceSize incrSize = pPage->size - (pPage->vaddr > curAddr ? ((uintptr_t)pPage->vaddr - (uintptr_t)curAddr) : ((uintptr_t)curAddr - (uintptr_t)pPage->vaddr));
+            
+            curSize -= MIN(incrSize, curSize);
+            curAddr += MIN(incrSize, curSize);
             goto nextPage;
+        }
 
         if (pPage->vaddr < curAddr)
         {
-            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x10)) < 0)
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x10, true)) < 0)
                 break;
-            goto checkPage;
+            pNextPage = pPage->next;
+            goto nextPage;
         }
 
         if ((pPage->vaddr + pPage->size) > (curAddr + curSize))
         {
-            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x10)) < 0)
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x10, false)) < 0)
                 break;
-            goto checkPage;
+            isMapped = false;
+            pNextPage = pPage->next;
         }
 
-        if ((ret = UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPage, 0)) < 0)
+        if (isMapped && (ret = UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPage, 0)) < 0)
         {
             LOG("Error: Failed to unmap page");
             break;
@@ -221,7 +234,7 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
         curSize -= pPage->size;
         curAddr += pPage->size;
         if (curSize)
-            pPage = TryMergePages(pMemBlock, pPage, pPrevPage, &pNextPage, &curAddr, &curSize);
+            pPage = TryMergePages(pMemBlock, pPage, pPrevPage, &pNextPage, &curAddr, &curSize, isMapped);
 
         oldMemBlockCode = pMemBlock->memBlockCode;
         pMemBlock->memBlockCode = (pMemBlock->memBlockCode & 0xFFFFFF0F) | prot;
@@ -234,6 +247,7 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
         pMemBlock->memBlockCode = oldMemBlockCode;
         pPrevPage = pPage;
     nextPage:
+        isMapped = true;
         pPage = pNextPage;
     }
 
@@ -275,7 +289,6 @@ int MemBlockCommitPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **
 
     while ((pPage != NULL) && (curSize != 0))
     {
-    checkPage:
         pNextPage = pPage->next;
         if ((pPage->vaddr < curAddr && ((pPage->vaddr + pPage->size) <= curAddr)) ||
             (pPage->vaddr >= (curAddr + curSize))) // Page is not within the target region
@@ -293,23 +306,24 @@ int MemBlockCommitPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **
 
         if (pPage->vaddr < curAddr)
         {
-            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1)) < 0)
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1, true)) < 0)
                 break;
-            goto checkPage;
+            pNextPage = pPage->next;
+            goto nextPage;
         }
 
         if ((pPage->vaddr + pPage->size) > (curAddr + curSize))
         {
-            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1)) < 0)
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1, true)) < 0)
                 break;
-            goto checkPage;
+            pNextPage = pPage->next;
         }
 
         if ((pPage->size & (pPage->size - 1)) != 0) // Size is not a power of two.
         {
-            if ((ret = SplitPage(pMemBlock, pPage, curAddr, (1 << (31 - __builtin_clz(pPage->size))), 0x1)) < 0)
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, (1 << (31 - __builtin_clz(pPage->size))), 0x1, true)) < 0)
                 break;
-            goto checkPage;
+            pNextPage = pPage->next;
         }
 
         curSize -= pPage->size;
@@ -333,13 +347,13 @@ int MemBlockCommitPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **
         }
         while (pNewPage != pPage)
         {
-            pPage = pPage->next;
-            if ((ret = MapVirPageCore(NULL, pMemBlock->pPartition, &pMemBlock->pPartition->tiny.pMMUContext->pProcessTTBR, pMemBlock, pPage->vaddr, pPage->size, pPage->paddr)) < 0)
+            if ((ret = MapVirPageCore(NULL, pMemBlock->pPartition, &pMemBlock->pPartition->tiny.pMMUContext->pProcessTTBR, pMemBlock, pNewPage->vaddr, pNewPage->size, pNewPage->paddr)) < 0)
             {
                 LOG("Error: Failed to map page");
                 pMemBlock->memBlockCode = oldMemBlockCode;
                 break;
             }
+            pNewPage = pNewPage->next;
         }
         pMemBlock->memBlockCode = oldMemBlockCode;
     nextPage:
@@ -439,33 +453,35 @@ int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot,
 
     while ((pPage != NULL) && (curSize != 0))
     {
-    checkPage:
         pNextPage = pPage->next;
         if ((pPage->vaddr < curAddr && ((pPage->vaddr + pPage->size) <= curAddr)) ||
             (pPage->vaddr >= (curAddr + curSize))) // Page is not within the target region
             goto nextPage;
 
+        if ((pPage->flags & 0x3F) == 0x4) // Unmapped pages
+        {
+            LOG("Warning: Pages are already commited at addr %p (0x%X bytes). Skipping...", curAddr, pPage->size);
+            SceSize incrSize = pPage->size - (pPage->vaddr > curAddr ? ((uintptr_t)pPage->vaddr - (uintptr_t)curAddr) : ((uintptr_t)curAddr - (uintptr_t)pPage->vaddr));
+
+            curSize -= MIN(incrSize, curSize);
+            curAddr += MIN(incrSize, curSize);
+            curOffset += MIN(incrSize, curSize);
+            goto nextPage;
+        }
+
         if (pPage->vaddr < curAddr)
         {
-            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1)) < 0)
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1, true)) < 0)
                 break;
-            goto checkPage;
+            pNextPage = pPage->next;
+            goto nextPage;
         }
 
         if ((pPage->vaddr + pPage->size) > (curAddr + curSize))
         {
-            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1)) < 0)
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, 0x1, true)) < 0)
                 break;
-            goto checkPage;
-        }
-
-        if ((pPage->flags & 0x3F) == 0x4)
-        {
-            LOG("Warning: Pages are already commited at addr %p", curAddr);
-            curSize -= (curSize >= pPage->size ? pPage->size : curSize);
-            curAddr += (curSize >= pPage->size ? pPage->size : curSize);
-            curOffset += (curSize >= pPage->size ? pPage->size : curSize);
-            goto nextPage;
+            pNextPage = pPage->next;
         }
 
         mirrorSize = pPage->size;
@@ -474,9 +490,9 @@ int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot,
 
         if (pPage->size > mirrorSize)
         {
-            if ((ret = SplitPage(pMemBlock, pPage, curAddr, mirrorSize, 0x1)) < 0)
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, mirrorSize, 0x1, true)) < 0)
                 break;
-            goto checkPage;
+            pNextPage = pPage->next;
         }
 
         pPage->flags = (pPage->flags & ~0x3F) | 0x10;
@@ -509,6 +525,108 @@ int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot,
     *addr = curAddr;
     *len = curSize;
     *offset = curOffset;
+    return ret;
+}
+
+int MemBlockDecommitPages(SceUIDMemBlockObject *pMemBlock, void **addr, SceSize *len)
+{
+    SceKernelMemBlockPage *pPage, *pNextPage = NULL, *pPrevPage = NULL;
+    int ret = 0, intrState;
+    void *curAddr;
+    SceSize curSize;
+
+    if ((pMemBlock->otherFlags & 0xF0000) != 0x40000)
+    {
+        LOG("Error: MemBlock paging type unsupported (0x%X)", pMemBlock->otherFlags & 0xF0000);
+        return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
+    }
+
+    intrState = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
+
+    curAddr = *addr;
+    curSize = *len;
+
+    pPage = pMemBlock->pages;
+
+#ifdef PRINT_MEMBLOCK_PAGES
+    InspectMemBlockPages(pMemBlock);
+#endif
+
+    while ((pPage != NULL) && (curSize != 0))
+    {
+        pNextPage = pPage->next;
+        if ((pPage->vaddr < curAddr && ((pPage->vaddr + pPage->size) <= curAddr)) ||
+            (pPage->vaddr >= (curAddr + curSize))) // Page is not within the target region
+            goto nextPage;
+
+        if ((pPage->flags & 0x14) == 0) // Unmapped pages
+        {
+            SceSize incrSize = pPage->size - (pPage->vaddr > curAddr ? ((uintptr_t)pPage->vaddr - (uintptr_t)curAddr) : ((uintptr_t)curAddr - (uintptr_t)pPage->vaddr));
+            
+            curSize -= MIN(incrSize, curSize);
+            curAddr += MIN(incrSize, curSize);
+            goto nextPage;
+        }
+        else if ((pPage->flags & 0x3F) == 0x4 && pPage->vaddr != curAddr && pPage->size > curSize) // Not possible to split phy pages currently.
+        {
+            LOG("Warning: Attempted to partially decommit a page. Ignoring...");
+            SceSize incrSize = pPage->size - (pPage->vaddr > curAddr ? ((uintptr_t)pPage->vaddr - (uintptr_t)curAddr) : ((uintptr_t)curAddr - (uintptr_t)pPage->vaddr));
+
+            curSize -= MIN(incrSize, curSize);
+            curAddr += MIN(incrSize, curSize);
+            goto nextPage;
+        }
+
+        if (pPage->vaddr < curAddr)
+        {
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, pPage->flags & 0x3F, true)) < 0)
+                break;
+            pNextPage = pPage->next;
+            goto nextPage;
+        }
+
+        if ((pPage->vaddr + pPage->size) > (curAddr + curSize))
+        {
+            if ((ret = SplitPage(pMemBlock, pPage, curAddr, curSize, pPage->flags & 0x3F, true)) < 0)
+                break;
+            pNextPage = pPage->next;
+        }
+
+        curSize -= pPage->size;
+        curAddr += pPage->size;
+
+        if ((ret = UnmapVirPageWithOpt(pMemBlock->pPartition, pMemBlock, pPage, 0)) < 0)
+        {
+            LOG("Error: Failed to unmap page");
+            break;
+        }
+        if (pPage->phyPage != NULL)
+        {
+            PhyMemPartFreePhyPage(pMemBlock->pPhyPart, pPage->phyPage);
+            pPage->phyPage = NULL;
+        }
+        if ((pPrevPage != NULL) && ((pPage->flags & 0x3F) != 0x4) && ((pPrevPage->flags & 0x14) == 0))
+        {
+            pPrevPage->size += pPage->size;
+            FreeVirPageObject(pMemBlock->pPartition, (void *)pMemBlock->pPartition->tiny.pMMUContext->unk_0x1C, pPage);
+            pPrevPage->next = pNextPage;
+        }
+        else
+            pPage->flags = (pPage->flags & ~0x3F) | 0x1;
+
+    nextPage:
+        pPrevPage = pPage;
+        pPage = pNextPage;
+    }
+
+#ifdef PRINT_MEMBLOCK_PAGES
+    InspectMemBlockPages(pMemBlock);
+#endif
+
+    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState);
+
+    *addr = curAddr;
+    *len = curSize;
     return ret;
 }
 
@@ -738,6 +856,44 @@ int kuKernelMemCommit(void *addr, SceSize len, SceUInt32 prot, KuKernelMemCommit
     return ret;
 }
 
+int kuKernelMemDecommit(void *addr, SceSize len)
+{
+    SceUIDAddressSpaceObject *pAS;
+    SceUIDMemBlockObject *pMemBlock;
+    int ret = 0;
+
+    if (len == 0)
+        return 0;
+
+    if (((uintptr_t)addr < 0x40000000) || ((uintptr_t)addr & 0xFFF))
+    {
+        LOG("Error: addr is invalid (%p)", addr);
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+    }
+
+    void *curAddr = addr;
+    SceSize curSize = (len + 0xFFF) & ~0xFFF; // Align to page size
+
+    pAS = ksceKernelSysrootGetCurrentAddressSpaceCB();
+
+    while (curSize)
+    {
+        if ((ret = AddressSpaceFindMemBlockCBByAddr(pAS, curAddr, 0, &pMemBlock)) < 0)
+        {
+            LOG("Error: Failed to find memBlock at address %p", curAddr);
+            return ret;
+        }
+
+        if ((ret = MemBlockDecommitPages(pMemBlock, &curAddr, &curSize)) < 0)
+        {
+            LOG("Error: Failed to decommit pages");
+            return ret;
+        }
+    }
+
+    return ret;
+}
+
 static SceUID injectUIDs[3];
 void InitMemProtect()
 {
@@ -768,6 +924,7 @@ void InitMemProtect()
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x2060 | 1, (uintptr_t *)&MapVirPageCore);
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x1F54 | 1, (uintptr_t *)&UnmapVirPageWithOpt);
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x3674 | 1, (uintptr_t *)&VirPageAllocPhyPage);
+        module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x13640 | 1, (uintptr_t *)&PhyMemPartFreePhyPage);
 
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x2B1F8, (uintptr_t *)&MemBlockTypeToL1PTE_DebugContext);
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x2B2A0, (uintptr_t *)&MemBlockTypeToL2PTESmallPage_DebugContext);
@@ -792,6 +949,7 @@ void InitMemProtect()
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x149E4 | 1, (uintptr_t *)&MapVirPageCore);
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x148D8 | 1, (uintptr_t *)&UnmapVirPageWithOpt);
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x15B1C | 1, (uintptr_t *)&VirPageAllocPhyPage);
+        module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0xE52C | 1, (uintptr_t *)&PhyMemPartFreePhyPage);
 
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x2B0F8, (uintptr_t *)&MemBlockTypeToL1PTE_DebugContext);
         module_get_offset(KERNEL_PID, moduleInfo.modid, 0, 0x2B170, (uintptr_t *)&MemBlockTypeToL2PTESmallPage_DebugContext);

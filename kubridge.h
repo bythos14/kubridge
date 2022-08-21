@@ -105,9 +105,10 @@ int kuKernelCpuUnrestrictedMemcpy(void *dst, const void *src, SceSize len);
 int kuKernelRegisterAbortHandler(KuKernelAbortHandler pHandler, KuKernelAbortHandler *pOldHandler, KuKernelAbortHandlerOpt *pOpt);
 void kuKernelReleaseAbortHandler();
 
-int kuKernelMemProtect(void *addr, SceSize size, SceUInt32 prot);
+int kuKernelMemProtect(void *addr, SceSize len, SceUInt32 prot);
 SceUID kuKernelMemReserve(void **addr, SceSize size, SceKernelMemBlockType memBlockType);
 int kuKernelMemCommit(void *addr, SceSize len, SceUInt32 prot, KuKernelMemCommitOpt *pOpt);
+int kuKernelMemDecommit(void *addr, SceSize len);
 
 #ifdef __cplusplus
 }
