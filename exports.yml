@@ -20,3 +20,4 @@ kubridge:
         - kuKernelMemProtect: 0x566d2af1
         - kuKernelMemReserve: 0xced3608c
         - kuKernelMemCommit: 0x9c0cd758
+        - kuKernelMemDecommit: 0x9bdf5881
