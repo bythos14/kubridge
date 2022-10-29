@@ -10,6 +10,7 @@
 
 #include <psp2/kernel/error.h>
 
+#include <stdbool.h>
 #include <taihen.h>
 
 #include "internal.h"
@@ -29,7 +30,6 @@ typedef struct SceKernelExceptionHandler
 
 int module_get_export_func(SceUID pid, const char *modname, uint32_t libnid, uint32_t funcnid, uintptr_t *func);
 
-static int (*_sceGUIDGetName)(SceUID guid, char **name);
 static int (*_sceKernelRegisterExceptionHandler)(SceExcpKind excpKind, SceUInt32 prio, SceKernelExceptionHandler *handler);
 static void *(*_sceKernelAllocRemoteProcessHeap)(SceUID pid, SceSize size, void *pOpt);
 static void (*_sceKernelFreeRemoteProcessHeap)(SceUID pid, void *ptr);
@@ -37,22 +37,24 @@ static int (*_sceKernelProcCopyToUserRx)(SceUID pid, void *dst, const void *src,
 
 extern SceKernelExceptionHandler DabtExceptionHandler_lvl0;
 extern SceKernelExceptionHandler PabtExceptionHandler_lvl0;
+extern SceKernelExceptionHandler UndefExceptionHandler_lvl0;
 
-void *userAbortBase;
-static SceUID userAbortMemBlockPid; // PID of process that owns userAbortMemBlock
-KuKernelAbortHandler defaultUserAbortHandler;
+void *exceptionBootstrapAddr = NULL;
 
-static ProcessAbortHandler *handlers;
-int32_t handlersMutex = 0;
-static SceUID userAbortMemBlock = -1;
+static int processContextPLSKey = -1;
+
+extern uint32_t exceptionsUserStart[], exceptionsUserEnd[], exceptionBootstrap[], defaultExceptionHandler[];
 
 int CheckStackPointer(void *stackPointer)
 {
     void *stackBounds[2];
     uint32_t *tlsAddr;
     asm volatile("mrc p15, 0, %0, c13, c0, #3" : "=r" (tlsAddr)); // Load TLS address from TPIDRURO register
-    if (tlsAddr == 0)
+    if (tlsAddr == NULL)
+    {
+        LOG("Error: Invalid TLS Address");
         return 0;
+    }
 
     tlsAddr -= (0x800 / sizeof(uint32_t));
 
@@ -94,133 +96,82 @@ uintptr_t GetProcessExitAddr()
     return addr;
 }
 
-void RemoveProcessAbortHandler(SceUID pid);
-ProcessAbortHandler *GetProcessAbortHandler(SceUID pid)
+KuKernelProcessContext *GetProcessContext(SceUID pid, bool init)
 {
-    ProcessAbortHandler *cur = handlers;
-    SceBool dontCreate = pid == -1;
+    KuKernelProcessContext *processContext;
 
-    if (pid == -1)
-        pid = ksceKernelGetProcessId();
-
-    while (cur != NULL)
+    if (ksceKernelGetProcessLocalStorageAddrForPid(pid, processContextPLSKey, (void **)&processContext, init) < 0)
     {
-        if (cur->pid == pid)
-            break;
-
-        cur = cur->pNext;
+        LOG("Error: Failed to get process context from PLS");
+        return NULL;
     }
 
-    if (cur == NULL && !dontCreate)
+    if (init == false)
+        return processContext;
+
+    int irqState = ksceKernelCpuSpinLockIrqSave(&processContext->spinLock);
+
+    if (processContext->exceptionBootstrapMemBlock == 0)
     {
-        cur = _sceKernelAllocRemoteProcessHeap(pid, sizeof(ProcessAbortHandler), NULL);
-        if (cur == NULL)
-        {
-            LOG("Failed to allocate ProcessAbortHandler for process 0x%X", pid);
-            return NULL;
-        }
-
-        cur->pid = pid;
-        cur->pHandler = defaultUserAbortHandler;
-        cur->pNext = handlers;
-        cur->userAbortMemBlock = -1;
-        handlers = cur;
-
-        if (pid != userAbortMemBlockPid)
-        {
-            SceKernelAllocMemBlockKernelOpt opt;
-            memset(&opt, 0, sizeof(opt));
-            opt.size = sizeof(opt);
-            opt.attr = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_PID | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_MIRROR_BLOCKID | 0x1000000 | 0x800000; // (HAS_PID | HAS_BASE | SHARE_PHYPAGE | SHARE_VBASE)
-            opt.mirror_blockid = userAbortMemBlock;
-            opt.pid = pid;
-            SceUID memBlock = ksceKernelAllocMemBlock("KuBridgeAbortDispatchBlock", SCE_KERNEL_MEMBLOCK_TYPE_USER_SHARED_SHARED_RX, 0x1000, &opt);
-            if (memBlock < 0)
-            {
-                LOG("Failed to allocate memBlock for user abort handler dispatch (0x%08X)", memBlock);
-                RemoveProcessAbortHandler(pid);
-                return NULL;
-            }
-            cur->userAbortMemBlock = memBlock;
-        }
-        else
-        {
-            cur->userAbortMemBlock = userAbortMemBlock;
-        }
-    }
-    else if (cur == NULL)
-        LOG("No user abort handler found for process 0x%X", pid);
-
-    return cur;
-}
-
-void RemoveProcessAbortHandler(SceUID pid)
-{
-    ProcessAbortHandler *cur = handlers, *prev = NULL;
-
-    if (pid == -1)
-        pid = ksceKernelGetProcessId();
-
-    while (cur != NULL)
-    {
-        if (cur->pid == pid)
-            break;
-
-        prev = cur;
-        cur = cur->pNext;
-    }
-
-    if (cur != NULL)
-    {
-        if (prev == NULL)
-            handlers = NULL;
-        else
-            prev->pNext = cur->pNext;
-
-        if (cur->userAbortMemBlock != -1 && cur->userAbortMemBlock != userAbortMemBlock)
-            ksceKernelFreeMemBlock(cur->userAbortMemBlock);
-
-        _sceKernelFreeRemoteProcessHeap(pid, cur);
-    }
-    else
-        LOG("No user abort hanlder found for process 0x%X", pid);
-}
-
-static int CreateProcess(SceUID pid, SceProcEventInvokeParam2 *a2, int a3)
-{
-    char *name;
-    _sceGUIDGetName(pid, &name);
-
-    if ((strncmp(name, "main", 4) == 0) && (userAbortMemBlock == -1))
-    {
+        processContext->pid = pid == 0 ? ksceKernelGetProcessId() : pid;
+        bool setBootstrapAddr = exceptionBootstrapAddr == NULL;
         SceKernelAllocMemBlockKernelOpt opt;
         memset(&opt, 0, sizeof(opt));
         opt.size = sizeof(opt);
-        opt.attr = 0x8000000 | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_PID; // Attr 0x8000000 allocates the memBlock at the highest address available
-        opt.pid = pid;
-        userAbortMemBlock = ksceKernelAllocMemBlock("KuBridgeAbortHandlerUserBlock", SCE_KERNEL_MEMBLOCK_TYPE_USER_SHARED_SHARED_RX, 0x1000, &opt);
-        if (userAbortMemBlock < 0)
+        if (setBootstrapAddr)
+            opt.attr = 0x8000000 | SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_PID; // Attr 0x8000000 allocates the memBlock at the highest address available
+        else
         {
-            LOG("Failed to allocate base memBlock for user abort handler dispatch (0x%08X)", userAbortMemBlock);
-            return 0;
+            opt.attr = SCE_KERNEL_ALLOC_MEMBLOCK_ATTR_HAS_PID | 0x00000001; // (HAS_PID | HAS_VBASE)
+            opt.field_C = (uintptr_t)exceptionBootstrapAddr;
         }
-        ksceKernelGetMemBlockBase(userAbortMemBlock, &userAbortBase);
+        opt.pid = pid;
+        processContext->exceptionBootstrapMemBlock = ksceKernelAllocMemBlock("KuBridgeExcpHandlerBootstrap", SCE_KERNEL_MEMBLOCK_TYPE_USER_SHARED_MAIN_RX, 0x1000, &opt);
+        if (processContext->exceptionBootstrapMemBlock < 0)
+        {
+            LOG("Failed to allocate base memBlock for exception handler bootstrap code (0x%08X)", processContext->exceptionBootstrapMemBlock);
+            processContext->exceptionBootstrapMemBlock = -1;
+            goto exit;
+        }
+        ksceKernelGetMemBlockBase(processContext->exceptionBootstrapMemBlock, &processContext->exceptionBootstrapBase);
+        if (setBootstrapAddr)
+            exceptionBootstrapAddr = processContext->exceptionBootstrapBase;
 
-        _sceKernelProcCopyToUserRx(pid, userAbortBase, &exceptions_user_bin[0], exceptions_user_bin_len);
-
-        defaultUserAbortHandler = (KuKernelAbortHandler)(userAbortBase + (sizeof(SceUInt32) * 5));
-        userAbortMemBlockPid = pid;
+        _sceKernelProcCopyToUserRx(pid, processContext->exceptionBootstrapBase, &exceptionsUserStart[0], (uintptr_t)&exceptionsUserEnd[0] - (uintptr_t)&exceptionsUserStart[0]);
+        processContext->pDefaultHandler = processContext->exceptionBootstrapBase + ((uintptr_t)&defaultExceptionHandler[0] - (uintptr_t)&exceptionsUserStart[0]);
     }
-    return 0;
+
+exit:
+    ksceKernelCpuSpinLockIrqRestore(&processContext->spinLock, irqState);
+
+    return processContext;
+}
+
+KuKernelExceptionHandler GetExceptionHandler(uint32_t exceptionType)
+{
+    KuKernelProcessContext *processContext = GetProcessContext(0, false);
+    if (processContext == 0)
+        return NULL;
+
+    int irqState = ksceKernelCpuSpinLockIrqSave(&processContext->spinLock);
+    KuKernelExceptionHandler pHandler = processContext->pExceptionHandlers[exceptionType];
+    ksceKernelCpuSpinLockIrqRestore(&processContext->spinLock, irqState);
+
+    return pHandler;
 }
 
 static int DestroyProcess(SceUID pid, SceProcEventInvokeParam1 *a2, int a3)
 {
-    int irqState = ksceKernelCpuSpinLockIrqSave(&handlersMutex);
+    KuKernelProcessContext *processContext = GetProcessContext(pid, false);
+    if (processContext == NULL)
+        return 0;
 
-    RemoveProcessAbortHandler(pid);
+    int irqState = ksceKernelCpuSpinLockIrqSave(&processContext->spinLock);
+    
+    if (processContext->exceptionBootstrapMemBlock != -1)
+        ksceKernelFreeMemBlock(processContext->exceptionBootstrapMemBlock);
 
-    ksceKernelCpuSpinLockIrqRestore(&handlersMutex, irqState);
+    ksceKernelCpuSpinLockIrqRestore(&processContext->spinLock, irqState);
 
     return 0;
 }
@@ -235,84 +186,134 @@ void InitExceptionHandlers()
 
     module_get_export_func(KERNEL_PID, "SceProcessmgr", TAI_ANY_LIBRARY, 0x00B1CA0F, (uintptr_t *)&_sceKernelAllocRemoteProcessHeap);
     module_get_export_func(KERNEL_PID, "SceProcessmgr", TAI_ANY_LIBRARY, 0x9C28EA9A, (uintptr_t *)&_sceKernelFreeRemoteProcessHeap);
-    module_get_export_func(KERNEL_PID, "SceSysmem", TAI_ANY_LIBRARY, 0xA78755EB, (uintptr_t *)&_sceGUIDGetName);
 
     _sceKernelRegisterExceptionHandler(SCE_EXCP_DABT, 0, &DabtExceptionHandler_lvl0);
     _sceKernelRegisterExceptionHandler(SCE_EXCP_PABT, 0, &PabtExceptionHandler_lvl0);
+    _sceKernelRegisterExceptionHandler(SCE_EXCP_UNDEF_INSTRUCTION, 0, &UndefExceptionHandler_lvl0);
 
     SceProcEventHandler handler;
     memset(&handler, 0, sizeof(handler));
     handler.size = sizeof(handler);
-    handler.create = CreateProcess;
     handler.exit = DestroyProcess;
     handler.kill = DestroyProcess;
 
     ksceKernelRegisterProcEventHandler("KuBridgeProcessHandler", &handler, 0);
+
+    processContextPLSKey = ksceKernelCreateProcessLocalStorage("KuBridgeProcessContext", sizeof(KuKernelProcessContext));
+    if (processContextPLSKey < 0)
+        LOG("Error: Failed to create PLS for process context");
 }
 
-int kuKernelRegisterAbortHandler(KuKernelAbortHandler pHandler, KuKernelAbortHandler *pOldHandler, KuKernelAbortHandlerOpt *pOpt)
+int kuKernelRegisterExceptionHandler(SceUInt32 exceptionType, KuKernelExceptionHandler pHandler, KuKernelExceptionHandler *pOldHandler, KuKernelExceptionHandlerOpt *pOpt)
 {
     int ret;
-    int irqState = ksceKernelCpuSpinLockIrqSave(&handlersMutex);
+
+    if (exceptionType > 2) // Highest supported type is 2
+    {
+        LOG("Error: Invalid exceptionType");
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
+    }
 
     if (pHandler == NULL)
     {
-        LOG("Invalid pHandler");
-        ret = SCE_KERNEL_ERROR_INVALID_ARGUMENT;
-        goto exit;
+        LOG("Error: Invalid pHandler");
+        return SCE_KERNEL_ERROR_INVALID_ARGUMENT;
     }
 
     if (pOpt != NULL)
     {
-        KuKernelAbortHandlerOpt opt;
-        ret = ksceKernelMemcpyFromUser(&opt, pOpt, sizeof(KuKernelAbortHandlerOpt));
+        KuKernelExceptionHandlerOpt opt;
+        ret = ksceKernelMemcpyFromUser(&opt, pOpt, sizeof(KuKernelExceptionHandlerOpt));
         if (ret < 0)
         {
-            LOG("Invalid pOpt");
-            goto exit;
+            LOG("Error: Invalid pOpt");
+            return ret;
         }
 
-        if (opt.size != sizeof(KuKernelAbortHandlerOpt))
+        if (opt.size != sizeof(KuKernelExceptionHandlerOpt))
         {
-            LOG("pOpt->size != sizeof(KuKernelAbortHandlerOpt)");
-            ret = SCE_KERNEL_ERROR_INVALID_ARGUMENT_SIZE;
-            goto exit;
+            LOG("Error: pOpt->size != sizeof(KuKernelExceptionHandlerOpt)");
+            return SCE_KERNEL_ERROR_INVALID_ARGUMENT_SIZE;
         }
     }
 
-    ProcessAbortHandler *procHandler = GetProcessAbortHandler(ksceKernelGetProcessId());
-    if (procHandler == NULL)
+    KuKernelProcessContext *processContext = GetProcessContext(0, true);
+    if ((processContext == NULL) || (processContext->exceptionBootstrapMemBlock == -1))
     {
-        ret = SCE_KERNEL_ERROR_NO_MEMORY;
-        goto exit;
+        LOG("Error: Failed to get process context for process 0x%X", ksceKernelGetProcessId());
+        return SCE_KERNEL_ERROR_NO_MEMORY;
     }
+
+    int irqState = ksceKernelCpuSpinLockIrqSave(&processContext->spinLock);
 
     if (pOldHandler != NULL)
     {
-        ret = ksceKernelMemcpyToUser(pOldHandler, &procHandler->pHandler, sizeof(KuKernelAbortHandler));
+        ret = ksceKernelMemcpyToUser(pOldHandler, &processContext->pExceptionHandlers[exceptionType], sizeof(KuKernelExceptionHandler));
         if (ret < 0)
         {
-            LOG("Invalid pOldHandler");
+            LOG("Error: Invalid pOldHandler");
             goto exit;
         }
     }
-        
-    procHandler->pHandler = pHandler;
-    if (pHandler == defaultUserAbortHandler)
-        RemoveProcessAbortHandler(ksceKernelGetProcessId());
+
+    processContext->pExceptionHandlers[exceptionType] = pHandler == processContext->pDefaultHandler ? NULL : pHandler;
 
     ret = 0;
 exit:
-    ksceKernelCpuSpinLockIrqRestore(&handlersMutex, irqState);
+    ksceKernelCpuSpinLockIrqRestore(&processContext->spinLock, irqState);
+
+    return ret;
+}
+
+void kuKernelReleaseExceptionHandler(SceUInt32 exceptionType)
+{
+    KuKernelProcessContext *processContext = GetProcessContext(0, false);
+    if ((processContext == NULL) || (processContext->exceptionBootstrapMemBlock == -1))
+        return;
+
+    int irqState = ksceKernelCpuSpinLockIrqSave(&processContext->spinLock);
+
+    processContext->pExceptionHandlers[exceptionType] = NULL;
+
+    ksceKernelCpuSpinLockIrqRestore(&processContext->spinLock, irqState);
+}
+
+// Deprecated
+int kuKernelRegisterAbortHandler(KuKernelAbortHandler pHandler, KuKernelAbortHandler *pOldHandler, KuKernelAbortHandlerOpt *pOpt)
+{
+    int ret = kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT, pHandler, NULL, NULL);
+    if (ret != 0)
+        return ret;
+    ret = kuKernelRegisterExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT, pHandler, NULL, NULL);
+    if (ret != 0)
+    {
+        goto release_dabt;
+    }
+
+    KuKernelProcessContext *processContext = GetProcessContext(0, false);
+
+    if (pOldHandler != NULL)
+    {
+        ret = ksceKernelMemcpyToUser(pOldHandler, &processContext->pDefaultHandler, sizeof(KuKernelExceptionHandler));
+        if (ret < 0)
+        {
+            LOG("Error: Invalid pOldHandler");
+            goto release_pabt;
+        }
+    }
+
+    return ret;
+
+release_pabt:
+    kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT);
+release_dabt:
+    kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT);
 
     return ret;
 }
 
 void kuKernelReleaseAbortHandler()
 {
-    int irqState = ksceKernelCpuSpinLockIrqSave(&handlersMutex);
-
-    RemoveProcessAbortHandler(ksceKernelGetProcessId());
-
-    ksceKernelCpuSpinLockIrqRestore(&handlersMutex, irqState);
+    kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT);
+    kuKernelReleaseExceptionHandler(KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT);
 }

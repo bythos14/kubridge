@@ -432,12 +432,14 @@ int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot,
     if ((pMemBlock->otherFlags & 0xF0000) != 0x40000)
     {
         LOG("Error: MemBlock paging type unsupported (0x%X)", pMemBlock->otherFlags & 0xF0000);
-        return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
+        ret = SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
+        goto exit;
     }
     if ((pBaseMemBlock->otherFlags & 0xF0000) != 0x40000)
     {
         LOG("Error: MemBlock paging type unsupported (0x%X)", pBaseMemBlock->otherFlags & 0xF0000);
-        return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
+        ret = SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
+        goto exit;
     }
 
     curAddr = *addr;
@@ -519,12 +521,13 @@ int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot,
     InspectMemBlockPages(pMemBlock);
 #endif
 
-    ksceKernelCpuUnlockResumeIntrStoreFlag(&pBaseMemBlock->spinLock, intrState[1]);
-    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState[0]);
-
     *addr = curAddr;
     *len = curSize;
     *offset = curOffset;
+exit:
+    ksceKernelCpuUnlockResumeIntrStoreFlag(&pBaseMemBlock->spinLock, intrState[1]);
+    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState[0]);
+
     return ret;
 }
 

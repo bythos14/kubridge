@@ -19,18 +19,11 @@ if(DEFINED EXCEPTION_SAFETY)
   set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DEXCEPTION_SAFETY=${EXCEPTION_SAFETY}")
 endif(DEFINED EXCEPTION_SAFETY)
 
-add_custom_command(OUTPUT ${CMAKE_CURRENT_BINARY_DIR}/exceptions_user.h
-                   COMMAND arm-vita-eabi-as ${CMAKE_CURRENT_SOURCE_DIR}/src/exceptions_user.S -o exceptions_user.o
-                   COMMAND arm-vita-eabi-objcopy -O binary exceptions_user.o exceptions_user.bin
-                   COMMAND xxd -i exceptions_user.bin ${CMAKE_CURRENT_BINARY_DIR}/exceptions_user.h
-                   COMMAND rm -f exceptions_user.o exceptions_user.bin
-                   DEPENDS src/exceptions_user.S)
-
 add_executable(kubridge
   src/main.c
   src/exceptions.c
   src/exceptions.S
-  ${CMAKE_CURRENT_BINARY_DIR}/exceptions_user.h
+  src/exceptions_bootstrap.S
   src/mprotect.c
   src/rwx_patch.S
 )
@@ -48,6 +41,7 @@ target_link_libraries(kubridge
   SceThreadmgrForDriver_stub
   SceDebugForDriver_stub
   SceSysrootForKernel_stub
+  SceProcessmgrForDriver_stub
 )
 
 vita_create_self(kubridge.skprx kubridge CONFIG exports.yml UNSAFE)
