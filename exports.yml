@@ -15,9 +15,13 @@ kubridge:
         - kuKernelCpuUnrestrictedMemcpy: 0x91D9CABC
         - kuPowerGetSysClockFrequency: 0x13371337
         - kuPowerSetSysClockFrequency: 0x13371338
-        - kuKernelRegisterAbortHandler: 0x799f5648
-        - kuKernelReleaseAbortHandler: 0xb188292d
         - kuKernelMemProtect: 0x566d2af1
         - kuKernelMemReserve: 0xced3608c
         - kuKernelMemCommit: 0x9c0cd758
         - kuKernelMemDecommit: 0x9bdf5881
+        - kuKernelRegisterExceptionHandler: 0xf9025d19
+        - kuKernelReleaseExceptionHandler: 0xdf9f3bed
+        
+        # Deprecated
+        - kuKernelRegisterAbortHandler: 0x799f5648
+        - kuKernelReleaseAbortHandler: 0xb188292d
