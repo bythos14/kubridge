@@ -28,9 +28,6 @@ add_executable(kubridge
   src/rwx_patch.S
 )
 
-target_include_directories(kubridge PRIVATE
-  ${CMAKE_CURRENT_BINARY_DIR})
-
 target_link_libraries(kubridge
   taihenForKernel_stub
   taihenModuleUtils_stub

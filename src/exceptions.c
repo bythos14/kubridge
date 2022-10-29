@@ -14,7 +14,6 @@
 #include <taihen.h>
 
 #include "internal.h"
-#include "exceptions_user.h"
 
 #if !defined(EXCEPTION_SAFETY)
 #define EXCEPTION_SAFETY 1
