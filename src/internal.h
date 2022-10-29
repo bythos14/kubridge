@@ -17,10 +17,11 @@
 
 #define KU_KERNEL_MEM_COMMIT_ATTR_HAS_BASE (0x1)
 
-#define KU_KERNEL_ABORT_TYPE_DATA_ABORT 0
-#define KU_KERNEL_ABORT_TYPE_PREFETCH_ABORT 1
+#define KU_KERNEL_EXCEPTION_TYPE_DATA_ABORT 0
+#define KU_KERNEL_EXCEPTION_TYPE_PREFETCH_ABORT 1
+#define KU_KERNEL_EXCEPTION_TYPE_UNDEF_INSTR 2
 
-typedef struct KuKernelAbortContext
+typedef struct KuKernelExceptionContext
 {
     SceUInt32 r0;
     SceUInt32 r1;
@@ -44,16 +45,16 @@ typedef struct KuKernelAbortContext
     SceUInt32 FPEXC;
     SceUInt32 FSR;
     SceUInt32 FAR;
-    SceUInt32 abortType;
-} KuKernelAbortContext;
+    SceUInt32 exceptionType;
+} KuKernelExceptionContext;
 
-typedef void (*KuKernelAbortHandler)(KuKernelAbortContext *);
+typedef void (*KuKernelExceptionHandler)(KuKernelExceptionContext *);
 
-// Options struct for future expansion
-typedef struct KuKernelAbortHandlerOpt
+// Structure for future expansion
+typedef struct KuKernelExceptionHandlerOpt
 {
     SceSize size;
-} KuKernelAbortHandlerOpt;
+} KuKernelExceptionHandlerOpt;
 
 typedef struct KuKernelMemCommitOpt
 {
@@ -63,17 +64,24 @@ typedef struct KuKernelMemCommitOpt
     SceUInt32 baseOffset;
 } KuKernelMemCommitOpt;
 
-typedef struct ProcessAbortHandler
+typedef struct KuKernelProcessContext
 {
     SceUID pid;
-    SceUID userAbortMemBlock;
-    KuKernelAbortHandler pHandler;
-    struct ProcessAbortHandler *pNext;
-} ProcessAbortHandler;
+    SceUID exceptionBootstrapMemBlock;
+    void *exceptionBootstrapBase;
+    KuKernelExceptionHandler pExceptionHandlers[3];
+    KuKernelExceptionHandler pDefaultHandler;
+    int spinLock;
+} KuKernelProcessContext;
 
 void InitExceptionHandlers();
 
 void InitMemProtect();
 void TermMemProtect();
+
+// Deprecated
+typedef KuKernelExceptionContext KuKernelAbortContext;
+typedef struct KuKernelAbortHandlerOpt KuKernelAbortHandlerOpt;
+typedef KuKernelExceptionHandler KuKernelAbortHandler;
 
 #endif
