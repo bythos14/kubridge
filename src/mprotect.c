@@ -56,8 +56,6 @@ static void InspectMemBlockPages(SceUIDMemBlockObject *pMemBlock)
 
 SceUIDAddressSpaceObject *ksceKernelSysrootGetCurrentAddressSpaceCB();
 int module_get_offset(SceUID pid, SceUID modid, int segidx, size_t offset, uintptr_t *addr);
-int ksceKernelCpuLockSuspendIntrStoreFlag(void *addr);
-void ksceKernelCpuUnlockResumeIntrStoreFlag(void *addr, unsigned int prev_state);
 
 static int (*AddressSpaceFindMemBlockCBByAddr)(void *pAS, void *vbase, SceSize size, SceUIDMemBlockObject **ppMemBlock);
 static int (*AllocVirPageObject)(SceUIDPartitionObject *pPartition, SceKernelMemBlockPage **pPage);
@@ -182,7 +180,7 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
         return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
     }
 
-    intrState = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
+    intrState = ksceKernelRWSpinlockLowWriteLockCpuSuspendIntr(&pMemBlock->spinLock);
 
     curAddr = *addr;
     curSize = *len;
@@ -255,7 +253,7 @@ int MemBlockProtectPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void *
     InspectMemBlockPages(pMemBlock);
 #endif
 
-    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState);
+    ksceKernelRWSpinlockLowWriteUnlockCpuResumeIntr(&pMemBlock->spinLock, intrState);
 
     *addr = curAddr;
     *len = curSize;
@@ -276,7 +274,7 @@ int MemBlockCommitPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **
         return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
     }
 
-    intrState = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
+    intrState = ksceKernelRWSpinlockLowWriteLockCpuSuspendIntr(&pMemBlock->spinLock);
 
     curAddr = *addr;
     curSize = *len;
@@ -364,7 +362,7 @@ int MemBlockCommitPages(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot, void **
     InspectMemBlockPages(pMemBlock);
 #endif
 
-    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState);
+    ksceKernelRWSpinlockLowWriteUnlockCpuResumeIntr(&pMemBlock->spinLock, intrState);
 
     *addr = curAddr;
     *len = curSize;
@@ -426,8 +424,8 @@ int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot,
     SceUInt32 curOffset;
     SceUInt32 mirrorPaddr, mirrorSize;
 
-    intrState[0] = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
-    intrState[1] = ksceKernelCpuLockSuspendIntrStoreFlag(&pBaseMemBlock->spinLock);
+    intrState[0] = ksceKernelRWSpinlockLowWriteLockCpuSuspendIntr(&pMemBlock->spinLock);
+    intrState[1] = ksceKernelRWSpinlockLowWriteLockCpuSuspendIntr(&pBaseMemBlock->spinLock);
 
     if ((pMemBlock->otherFlags & 0xF0000) != 0x40000)
     {
@@ -525,8 +523,8 @@ int MemBlockCommitPagesWithBase(SceUIDMemBlockObject *pMemBlock, SceUInt32 prot,
     *len = curSize;
     *offset = curOffset;
 exit:
-    ksceKernelCpuUnlockResumeIntrStoreFlag(&pBaseMemBlock->spinLock, intrState[1]);
-    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState[0]);
+    ksceKernelRWSpinlockLowWriteUnlockCpuResumeIntr(&pBaseMemBlock->spinLock, intrState[1]);
+    ksceKernelRWSpinlockLowWriteUnlockCpuResumeIntr(&pMemBlock->spinLock, intrState[0]);
 
     return ret;
 }
@@ -544,7 +542,7 @@ int MemBlockDecommitPages(SceUIDMemBlockObject *pMemBlock, void **addr, SceSize 
         return SCE_KERNEL_ERROR_SYSMEM_MEMBLOCK_ERROR;
     }
 
-    intrState = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
+    intrState = ksceKernelRWSpinlockLowWriteLockCpuSuspendIntr(&pMemBlock->spinLock);
 
     curAddr = *addr;
     curSize = *len;
@@ -626,7 +624,7 @@ int MemBlockDecommitPages(SceUIDMemBlockObject *pMemBlock, void **addr, SceSize 
     InspectMemBlockPages(pMemBlock);
 #endif
 
-    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState);
+    ksceKernelRWSpinlockLowWriteUnlockCpuResumeIntr(&pMemBlock->spinLock, intrState);
 
     *addr = curAddr;
     *len = curSize;
@@ -725,7 +723,7 @@ SceUID kuKernelMemReserve(void **addr, SceSize size, SceKernelMemBlockType memBl
         goto FreeBlock;
     }
 
-    intrState = ksceKernelCpuLockSuspendIntrStoreFlag(&pMemBlock->spinLock);
+    intrState = ksceKernelRWSpinlockLowWriteLockCpuSuspendIntr(&pMemBlock->spinLock);
 
     pPage = pMemBlock->pages;
     while (pPage != NULL)
@@ -739,7 +737,7 @@ SceUID kuKernelMemReserve(void **addr, SceSize size, SceKernelMemBlockType memBl
         pPage = pPage->next;
     }
 
-    ksceKernelCpuUnlockResumeIntrStoreFlag(&pMemBlock->spinLock, intrState);
+    ksceKernelRWSpinlockLowWriteUnlockCpuResumeIntr(&pMemBlock->spinLock, intrState);
 
     ksceGUIDReleaseObject(memBlock);
 

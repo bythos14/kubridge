@@ -2,6 +2,7 @@
 #define _SYSMEM_MEMBLOCK_H_
 
 #include <psp2common/types.h>
+#include <psp2kern/kernel/cpu.h>
 
 #define SCE_KERNEL_PHY_PAGE_SIZE_EXTRACT(pPhyPage) (((pPhyPage->word0 & 0xC0000000) == 0xC0000000) ? pPhyPage->size : 1 << ((pPhyPage->word0 & 0x1F00000) >> 0x14))
 #define SCE_KERNEL_PHY_PAGE_ADDR_EXTRACT(pPhyPage) ((pPhyPage->word0 & 0xFFFFF) << 0xC)
@@ -47,7 +48,7 @@ typedef struct SceUIDMemBlockObject
     int flags;
     void *vaddr;
     SceSize size; // non-aligned
-    uint32_t spinLock;
+    SceKernelRWSpinlock spinLock;
     union
     {
         struct

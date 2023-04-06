@@ -3,6 +3,7 @@
 
 #include <psp2common/types.h>
 #include <psp2kern/kernel/debug.h>
+#include <psp2kern/kernel/cpu.h>
 
 #ifndef NDEBUG
 #define LOG(msg, ...) ksceDebugPrintf("[kubridge ]: %s:%d:"msg"\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
@@ -71,7 +72,7 @@ typedef struct KuKernelProcessContext
     void *exceptionBootstrapBase;
     KuKernelExceptionHandler pExceptionHandlers[3];
     KuKernelExceptionHandler pDefaultHandler;
-    int spinLock;
+    SceKernelRWSpinlock spinLock;
 } KuKernelProcessContext;
 
 void InitExceptionHandlers();
