@@ -27,7 +27,7 @@ MemBlockTypeToL1PTE_UserRWX_kpanic:
     mov    r1, lr
     ldr    r0, =MemBlockTypeToL1PTE_DebugContext
     ldr    r0, [r0]
-    bl    ksceDebugPrintKernelPanic
+    bl    ksceKernelPanic
 
 MemBlockTypeToL2PTESmallPage_UserRWX:
     cmp    r0, #0x70
@@ -45,7 +45,7 @@ MemBlockTypeToL2PTESmallPage_UserRWX_kpanic:
     mov    r1, lr
     ldr    r0, =MemBlockTypeToL2PTESmallPage_DebugContext
     ldr    r0, [r0]
-    bl    ksceDebugPrintKernelPanic
+    bl    ksceKernelPanic
 
 MemBlockTypeToL2PTELargePage_UserRWX:
     cmp    r2, #0x70
@@ -63,4 +63,4 @@ MemBlockTypeToL2PTELargePage_UserRWX_kpanic:
     mov    r1, lr
     ldr    r0, =sceKernelMMUMapLargePages_DebugContext
     ldr    r0, [r0]
-    bl    ksceDebugPrintKernelPanic
+    bl    ksceKernelPanic
