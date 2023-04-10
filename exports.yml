@@ -13,6 +13,8 @@ kubridge:
         - kuKernelAllocMemBlock: 0x2EF7C290
         - kuKernelFlushCaches: 0x38B70744
         - kuKernelCpuUnrestrictedMemcpy: 0x91D9CABC
+        - kuPowerGetSysClockFrequency: 0x13371337
+        - kuPowerSetSysClockFrequency: 0x13371338
         - kuKernelMemProtect: 0x566d2af1
         - kuKernelMemReserve: 0xced3608c
         - kuKernelMemCommit: 0x9c0cd758

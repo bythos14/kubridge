@@ -102,6 +102,9 @@ void kuKernelFlushCaches(const void *ptr, SceSize len);
 
 int kuKernelCpuUnrestrictedMemcpy(void *dst, const void *src, SceSize len);
 
+int kuPowerGetSysClockFrequency(void);
+int kuPowerSetSysClockFrequency(int freq);
+
 int kuKernelRegisterExceptionHandler(SceUInt32 exceptionType, KuKernelExceptionHandler pHandler, KuKernelExceptionHandler *pOldHandler, KuKernelExceptionHandlerOpt *pOpt);
 void kuKernelReleaseExceptionHandler(SceUInt32 exceptionType);
 
