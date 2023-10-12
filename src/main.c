@@ -14,6 +14,15 @@ void (* _ksceKernelCpuIcacheAndL2WritebackInvalidateRange)(const void *ptr, SceS
 int (* _kscePowerGetSysClockFrequency)(void);
 int (* _kscePowerSetSysClockFrequency)(int freq);
 
+static int kuKernelEnableSwp(unsigned int args, void* arg) {
+  int sctlr;
+  asm volatile("mrc p15, 0, %0, c1, c0, 0" : "=r" (sctlr));
+  sctlr |= (1 << 10);
+  asm volatile("mcr p15, 0, %0, c1, c0, 0" :: "r" (sctlr));
+  asm volatile("isb " : : : "memory");
+  return ksceKernelExitDeleteThread(0);
+}
+
 void kuKernelFlushCaches(const void *ptr, SceSize len) {
   uintptr_t ptr_aligned;
   ptr_aligned = (uintptr_t)ptr & ~0x1F;
@@ -90,6 +99,13 @@ int module_start(SceSize args, void *argp) {
 
   module_get_export_func(KERNEL_PID, "ScePower", TAI_ANY_LIBRARY, 0xC63DACD5, (uintptr_t *)&_kscePowerGetSysClockFrequency);
   module_get_export_func(KERNEL_PID, "ScePower", TAI_ANY_LIBRARY, 0x0E333BEC, (uintptr_t *)&_kscePowerSetSysClockFrequency);
+  
+  for (int i = 0; i < 4; i++) {
+    SceUID thd = ksceKernelCreateThread("thd", kuKernelEnableSwp, 0x40, 0x8000, 0, 0x10000 << i, NULL);
+    ksceKernelStartThread(thd, 0, NULL);
+    int r;
+    ksceKernelWaitThreadEnd(thd, &r, NULL);
+  }
   
   InitExceptionHandlers();
   InitMemProtect();
