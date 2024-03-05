@@ -6,10 +6,13 @@
 #include <psp2kern/kernel/cpu.h>
 
 #ifndef NDEBUG
-#define LOG(msg, ...) ksceDebugPrintf("[kubridge ]: %s:%d:"msg"\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
+#define LOG(msg, ...) ksceKernelPrintf("[kubridge ]: %s:%d:"msg"\n", __FUNCTION__, __LINE__, ##__VA_ARGS__)
 #else
 #define LOG(msg, ...)
 #endif
+
+#define ENTER_FUNC() LOG("Entering")
+#define EXIT_FUNC() LOG("Exiting")
 
 #define KU_KERNEL_PROT_NONE  (0x00)
 #define KU_KERNEL_PROT_READ  (0x40)
@@ -72,7 +75,7 @@ typedef struct KuKernelProcessContext
     void *exceptionBootstrapBase;
     KuKernelExceptionHandler pExceptionHandlers[3];
     KuKernelExceptionHandler pDefaultHandler;
-    SceKernelRWSpinlock spinLock;
+    SceKernelSpinlock spinLock;
 } KuKernelProcessContext;
 
 void InitExceptionHandlers();

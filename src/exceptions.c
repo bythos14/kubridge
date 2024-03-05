@@ -108,12 +108,10 @@ KuKernelProcessContext *GetProcessContext(SceUID pid, bool init)
     if (init == false)
         return processContext;
 
-    ksceKernelRWSpinlockLowReadLock(&processContext->spinLock);
+    ksceKernelSpinlockLowLock(&processContext->spinLock);
 
     if (processContext->exceptionBootstrapMemBlock == 0)
     {
-        ksceKernelRWSpinlockLowReadUnlock(&processContext->spinLock);
-        ksceKernelRWSpinlockLowWriteLock(&processContext->spinLock);
         processContext->pid = pid == 0 ? ksceKernelGetProcessId() : pid;
         bool setBootstrapAddr = exceptionBootstrapAddr == NULL;
         SceKernelAllocMemBlockKernelOpt opt;
@@ -140,12 +138,10 @@ KuKernelProcessContext *GetProcessContext(SceUID pid, bool init)
 
         _sceKernelProcCopyToUserRx(pid, processContext->exceptionBootstrapBase, &exceptionsUserStart[0], (uintptr_t)&exceptionsUserEnd[0] - (uintptr_t)&exceptionsUserStart[0]);
         processContext->pDefaultHandler = processContext->exceptionBootstrapBase + ((uintptr_t)&defaultExceptionHandler[0] - (uintptr_t)&exceptionsUserStart[0]);
-        ksceKernelRWSpinlockLowWriteUnlock(&processContext->spinLock);
     }
-    else
-        ksceKernelRWSpinlockLowReadUnlock(&processContext->spinLock);
 
 exit:
+    ksceKernelSpinlockLowUnlock(&processContext->spinLock);
     return processContext;
 }
 
@@ -155,9 +151,9 @@ KuKernelExceptionHandler GetExceptionHandler(uint32_t exceptionType)
     if (processContext == NULL)
         return NULL;
 
-    ksceKernelRWSpinlockLowReadLock(&processContext->spinLock);
+    ksceKernelSpinlockLowLock(&processContext->spinLock);
     KuKernelExceptionHandler pHandler = processContext->pExceptionHandlers[exceptionType];
-    ksceKernelRWSpinlockLowReadUnlock(&processContext->spinLock);
+    ksceKernelSpinlockLowUnlock(&processContext->spinLock);
 
     return pHandler;
 }
@@ -168,12 +164,12 @@ static int DestroyProcess(SceUID pid, SceProcEventInvokeParam1 *a2, int a3)
     if (processContext == NULL)
         return 0;
 
-    ksceKernelRWSpinlockLowWriteLock(&processContext->spinLock);
+    int irqState = ksceKernelSpinlockLowLockCpuSuspendIntr(&processContext->spinLock);
 
     SceUID memBlock = processContext->exceptionBootstrapMemBlock;
     processContext->exceptionBootstrapMemBlock = -1;
 
-    ksceKernelRWSpinlockLowWriteUnlock(&processContext->spinLock);
+    ksceKernelSpinlockLowUnlockCpuResumeIntr(&processContext->spinLock, irqState);
 
     if (memBlock != -1)
     {
@@ -251,7 +247,7 @@ int kuKernelRegisterExceptionHandler(SceUInt32 exceptionType, KuKernelExceptionH
         return SCE_KERNEL_ERROR_NO_MEMORY;
     }
 
-    int irqState = ksceKernelRWSpinlockLowWriteLockCpuSuspendIntr(&processContext->spinLock);
+    int irqState = ksceKernelSpinlockLowLockCpuSuspendIntr(&processContext->spinLock);
 
     if (pOldHandler != NULL)
     {
@@ -267,7 +263,7 @@ int kuKernelRegisterExceptionHandler(SceUInt32 exceptionType, KuKernelExceptionH
 
     ret = 0;
 exit:
-    ksceKernelRWSpinlockLowWriteUnlockCpuResumeIntr(&processContext->spinLock, irqState);
+    ksceKernelSpinlockLowUnlockCpuResumeIntr(&processContext->spinLock, irqState);
 
     return ret;
 }
@@ -278,11 +274,11 @@ void kuKernelReleaseExceptionHandler(SceUInt32 exceptionType)
     if ((processContext == NULL) || (processContext->exceptionBootstrapMemBlock == -1))
         return;
 
-    int irqState = ksceKernelRWSpinlockLowWriteLockCpuSuspendIntr(&processContext->spinLock);
+    int irqState = ksceKernelSpinlockLowLockCpuSuspendIntr(&processContext->spinLock);
 
     processContext->pExceptionHandlers[exceptionType] = NULL;
 
-    ksceKernelRWSpinlockLowWriteUnlockCpuResumeIntr(&processContext->spinLock, irqState);
+    ksceKernelSpinlockLowUnlockCpuResumeIntr(&processContext->spinLock, irqState);
 }
 
 // Deprecated
