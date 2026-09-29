@@ -15,7 +15,8 @@
 #include <stdbool.h>
 
 #include "internal.h"
-#include "sysmem/sysmem_types.h"
+#include "sysmem/memblock.h"
+#include "sysmem/sce_as.h"
 
 #define MIN(a, b) (a > b ? b : a)
 
@@ -54,7 +55,6 @@ static void InspectMemBlockPages(SceUIDMemBlockObject *pMemBlock)
 }
 #endif
 
-SceUIDAddressSpaceObject *ksceKernelSysrootGetCurrentAddressSpaceCB();
 int module_get_offset(SceUID pid, SceUID modid, int segidx, size_t offset, uintptr_t *addr);
 
 static int (*AddressSpaceFindMemBlockCBByAddr)(void *pAS, void *vbase, SceSize size, SceUIDMemBlockObject **ppMemBlock);
